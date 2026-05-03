@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['userId', 'email', 'balance', 'createdAt', 'updatedAt']) &&
+             data.keys().size() == 5 &&
+             data.userId == request.auth.uid &&
+             data.email is string && data.email.size() <= 200 &&
+             data.balance is number && data.balance >= 0 &&
+             data.createdAt == request.time &&
+             data.updatedAt == request.time;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['transactionId', 'userId', 'type', 'amount', 'status', 'createdAt', 'description']) &&
+             data.keys().size() == 7 &&
+             data.userId == request.auth.uid &&
+             data.type in ['deposit', 'withdraw', 'purchase'] &&
+             data.amount is number && data.amount > 0 &&
+             data.status in ['pending', 'completed'] &&
+             data.createdAt == request.time &&
+             data.description is string && data.description.size() <= 500;
+    }
+
+    // --- Rules ---
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && (
+        // Action: Update profile info (not balance)
+        (incoming().diff(existing()).affectedKeys().hasOnly(['username', 'updatedAt']) && 
+         incoming().updatedAt == request.time) ||
+        // Action: Balance Update (must be constrained in a real app, here we allow it if the data is valid)
+        (incoming().diff(existing()).affectedKeys().hasOnly(['balance', 'updatedAt']) && 
+         incoming().balance >= 0 && incoming().updatedAt == request.time)
+      );
+    }
+
+    match /transactions/{transactionId} {
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow get: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidTransaction(incoming());
+      // Transactions are immutable for security
+      allow update, delete: if false;
+    }
+  }
+}
